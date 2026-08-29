@@ -53,9 +53,5 @@ ENV HF_HOME=/workspace/models
 # Expose for local testing only (RunPod serverless doesn't need this)
 EXPOSE 8000
 
-# ── Healthcheck ───────────────────────────────────────────────────────────────
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import runpod; import moviepy; import faster_whisper; print('OK')" || exit 1
-
 # ── Start RunPod serverless worker ───────────────────────────────────────────
 CMD ["python", "-u", "handler.py"]
