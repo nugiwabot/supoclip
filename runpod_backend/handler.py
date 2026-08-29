@@ -291,6 +291,7 @@ def action_render(job_input: dict) -> dict:
                     word_timestamps=word_timestamps,
                     high_impact_words=high_impact_words,
                     clip_start_time=clip_start,
+                    hook_title=clip_info.get("hook_title", ""),
                     impact_color_idx=i,
                 )
 
@@ -408,6 +409,7 @@ def action_download_and_process(job_input: dict) -> dict:
                     word_timestamps=word_timestamps,
                     high_impact_words=high_impact_words,
                     clip_start_time=clip_start,
+                    hook_title=clip_info.get("hook_title", ""),
                     impact_color_idx=i,
                 )
 
