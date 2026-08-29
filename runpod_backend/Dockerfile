@@ -1,10 +1,12 @@
-# SupoClip v2.0 — RunPod Backend Container
-# Base: RunPod PyTorch 2.2.1 + Python 3.10 + CUDA 12.1
+# SupoClip v2.0 — RunPod Backend Serverless Container
+# Official RunPod Serverless Base with CUDA 12.2
 
-FROM runpod/pytorch:2.2.1-py3.10-cuda12.1.1-devel-ubuntu22.04
+FROM runpod/base:0.6.2-cuda12.2.0
 
 # ── System dependencies ──────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    python3-dev \
     ffmpeg \
     libsm6 \
     libxext6 \
@@ -19,10 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── Set working directory ────────────────────────────────────────────────────
 WORKDIR /app
 
-# ── Python dependencies (install before copying code for layer caching) ──────
+# ── Python dependencies ──────────────────────────────────────────────────────
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121 && \
+    pip3 install --no-cache-dir -r requirements.txt
 
 # ── App code ─────────────────────────────────────────────────────────────────
 COPY . /app
@@ -47,11 +50,10 @@ RUN wget -q -O /workspace/assets/fonts/Montserrat-Bold.ttf \
 # ── Environment ───────────────────────────────────────────────────────────────
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH="/app"
 ENV TORCH_HOME=/workspace/models
 ENV HF_HOME=/workspace/models
 
-# Expose for local testing only (RunPod serverless doesn't need this)
-EXPOSE 8000
-
-# ── Start RunPod serverless worker ───────────────────────────────────────────
-CMD ["python", "-u", "handler.py"]
+# ── Serverless Entrypoint (Reset base entrypoint) ────────────────────────────
+ENTRYPOINT []
+CMD ["python3", "-u", "/app/handler.py"]
