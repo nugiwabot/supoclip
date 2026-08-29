@@ -14,7 +14,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Sample rate: analyze 1 frame every N seconds
-SAMPLE_INTERVAL_SEC = 0.5
+SAMPLE_INTERVAL_SEC = 1.0
 # Smoothing window for jitter reduction
 SMOOTHING_WINDOW = 5
 
@@ -73,26 +73,25 @@ class FaceTracker:
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = total_frames / fps
-        sample_frames = int(fps * SAMPLE_INTERVAL_SEC)
+        duration = total_frames / fps if fps > 0 else 0
+        sample_step = max(1, int(fps * SAMPLE_INTERVAL_SEC))
 
         results = []
         frame_idx = 0
 
-        while True:
+        while frame_idx < total_frames:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             if not ret:
                 break
 
-            if frame_idx % sample_frames == 0:
-                timestamp = frame_idx / fps
-                cx = self._detect_face_center_x(frame, video_width)
-                results.append({
-                    "time": round(timestamp, 3),
-                    "center_x": cx,
-                })
-
-            frame_idx += 1
+            timestamp = frame_idx / fps
+            cx = self._detect_face_center_x(frame, video_width)
+            results.append({
+                "time": round(timestamp, 3),
+                "center_x": cx,
+            })
+            frame_idx += sample_step
 
         cap.release()
         logger.info(

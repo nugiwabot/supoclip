@@ -248,11 +248,15 @@ def action_render(job_input: dict) -> dict:
         video_path = tmpdir / f"{task_id}_source.mp4"
         _download_video(video_url, video_path)
 
-        logger.info(f"[{task_id}] Transcribing for caption sync...")
-        transcriber      = Transcriber(model_size=whisper_model)
-        transcription    = transcriber.transcribe(video_path)
-        word_timestamps  = transcription["words"]
-        logger.info(f"[{task_id}] Got {len(word_timestamps)} word timestamps")
+        word_timestamps = job_input.get("word_timestamps")
+        if word_timestamps:
+            logger.info(f"[{task_id}] Using {len(word_timestamps)} pre-computed word timestamps")
+        else:
+            logger.info(f"[{task_id}] Transcribing for caption sync...")
+            transcriber      = Transcriber(model_size=whisper_model)
+            transcription    = transcriber.transcribe(video_path)
+            word_timestamps  = transcription["words"]
+            logger.info(f"[{task_id}] Got {len(word_timestamps)} word timestamps")
 
         face_tracker   = FaceTracker() if enable_face_tracking else None
         video_editor   = VideoEditor(
@@ -361,11 +365,15 @@ def action_download_and_process(job_input: dict) -> dict:
         size_mb = video_path.stat().st_size / 1_048_576
         logger.info(f"[{task_id}] Download complete: {video_path.name} ({size_mb:.1f} MB)")
 
-        logger.info(f"[{task_id}] Transcribing for caption sync...")
-        transcriber     = Transcriber(model_size=whisper_model)
-        transcription   = transcriber.transcribe(video_path)
-        word_timestamps = transcription["words"]
-        logger.info(f"[{task_id}] Got {len(word_timestamps)} word timestamps")
+        word_timestamps = job_input.get("word_timestamps")
+        if word_timestamps:
+            logger.info(f"[{task_id}] Using {len(word_timestamps)} pre-computed word timestamps")
+        else:
+            logger.info(f"[{task_id}] Transcribing for caption sync...")
+            transcriber     = Transcriber(model_size=whisper_model)
+            transcription   = transcriber.transcribe(video_path)
+            word_timestamps = transcription["words"]
+            logger.info(f"[{task_id}] Got {len(word_timestamps)} word timestamps")
 
         face_tracker   = FaceTracker() if enable_face_tracking else None
         video_editor   = VideoEditor(
