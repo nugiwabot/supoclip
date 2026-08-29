@@ -22,8 +22,9 @@ import tempfile
 import traceback
 from pathlib import Path
 
-import requests
-import runpod
+import sys
+print("=== SUPOCLIP RUNPOD SERVERLESS WORKER STARTING ===", flush=True)
+sys.stdout.flush()
 
 # Logging setup immediately
 logging.basicConfig(
@@ -33,6 +34,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("supoclip.handler")
 logger.info("Initializing SupoClip RunPod Serverless Handler...")
+print("=== LOGGING INITIALIZED SUCCESSFULLY ===", flush=True)
+
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,6 @@ ENV PYTHONPATH="/app"
 ENV TORCH_HOME=/workspace/models
 ENV HF_HOME=/workspace/models
 
-# ── Serverless Entrypoint (Reset base entrypoint) ────────────────────────────
-ENTRYPOINT []
-CMD ["python3", "-u", "/app/handler.py"]
+# ── Serverless Entrypoint ────────────────────────────────────────────────────
+ENTRYPOINT ["python3", "-u", "/app/handler.py"]
+
