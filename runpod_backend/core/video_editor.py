@@ -53,14 +53,8 @@ class VideoEditor:
             f"Source: {self.src_w}×{self.src_h} @ {self.src_fps:.2f}fps | {self.src_duration:.1f}s"
         )
 
-        # Pre-analyze face positions if tracker is available
+        # Face tracker reference (analyzed per clip on-demand for speed)
         self.face_data = []
-        if face_tracker is not None:
-            logger.info("Running face analysis on source video...")
-            self.face_data = face_tracker.analyze_video(
-                self.source_path, self.src_w, self.src_h
-            )
-            logger.info(f"Face analysis complete: {len(self.face_data)} samples")
 
     def extract_and_reframe_clip(
         self,
@@ -95,11 +89,18 @@ class VideoEditor:
             f"{start:.2f}s → {end:.2f}s ({end-start:.1f}s)"
         )
 
+        # Fast on-demand face tracking for this clip segment only
+        clip_face_data = []
+        if self.face_tracker is not None:
+            clip_face_data = self.face_tracker.analyze_clip(
+                self.source_path, start, end, self.src_w, self.src_h
+            )
+
         # --- Step 1: Subclip ---
         raw_clip = self.source.subclip(start, end)
 
         # --- Step 2: Calculate 9:16 crop ---
-        reframed = self._reframe_to_vertical(raw_clip, start)
+        reframed = self._reframe_to_vertical(raw_clip, start, clip_face_data)
 
         # --- Step 3: Apply fade in/out transitions ---
         clip_with_fades = self._apply_fades(reframed)
@@ -128,7 +129,7 @@ class VideoEditor:
         logger.info(f"Clip rendered: {output_path.name} ({output_path.stat().st_size / 1e6:.1f} MB)")
         return output_path
 
-    def _reframe_to_vertical(self, clip, start_time: float):
+    def _reframe_to_vertical(self, clip, start_time: float, face_data: list = None):
         """
         Crop and resize clip to target 9:16 vertical format.
         Uses face tracking data if available, else center-crop.
@@ -151,11 +152,11 @@ class VideoEditor:
             crop_h = int(src_w / target_aspect)
 
         # Use face tracking or center
-        if self.face_data and self.face_tracker:
+        if face_data and self.face_tracker:
             # Dynamic crop: face-centered per frame
             clip_reframed = clip.fl(
                 lambda gf, t: self._make_frame_vertical(
-                    gf(t), t + start_time, src_w, src_h, crop_w, crop_h
+                    gf(t), t + start_time, src_w, src_h, crop_w, crop_h, face_data
                 ),
                 apply_to=["mask"],
             )
@@ -177,20 +178,21 @@ class VideoEditor:
         src_h: int,
         crop_w: int,
         crop_h: int,
+        face_data: list,
     ) -> np.ndarray:
         """Per-frame crop function for face-tracking mode."""
         # Get face-centered X position
         crop_x = self.face_tracker.get_crop_x_at_time(
-            self.face_data, abs_time, src_w, crop_w
+            face_data, abs_time, src_w, crop_w
         )
         crop_y = (src_h - crop_h) // 2
 
         # Crop
         cropped = frame[crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
 
-        # Resize to output dimensions
+        # Fast resize to output dimensions
         import cv2
-        resized = cv2.resize(cropped, (self.out_w, self.out_h), interpolation=cv2.INTER_LANCZOS4)
+        resized = cv2.resize(cropped, (self.out_w, self.out_h), interpolation=cv2.INTER_LINEAR)
         return resized
 
     def _apply_fades(self, clip):

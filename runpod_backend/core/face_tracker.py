@@ -40,6 +40,53 @@ class FaceTracker:
             self.available = False
             self.detector = None
 
+    def analyze_clip(
+        self,
+        video_path: str | Path,
+        start_sec: float,
+        end_sec: float,
+        video_width: int,
+        video_height: int,
+    ) -> list[dict]:
+        """
+        Sample video frames ONLY within [start_sec, end_sec] for ultra-fast face tracking.
+        """
+        if not self.available:
+            return self._center_fallback(video_width)
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            logger.error(f"Cannot open video: {video_path}")
+            return self._center_fallback(video_width)
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        start_frame = max(0, int(start_sec * fps))
+        end_frame = int(end_sec * fps)
+        sample_step = max(1, int(fps * SAMPLE_INTERVAL_SEC))
+
+        results = []
+        frame_idx = start_frame
+
+        while frame_idx <= end_frame:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            timestamp = frame_idx / fps
+            cx = self._detect_face_center_x(frame, video_width)
+            results.append({
+                "time": round(timestamp, 3),
+                "center_x": cx,
+            })
+            frame_idx += sample_step
+
+        cap.release()
+        if not results:
+            return self._center_fallback(video_width)
+
+        return self._smooth_results(results, video_width)
+
     def analyze_video(
         self,
         video_path: str | Path,
@@ -47,16 +94,7 @@ class FaceTracker:
         video_height: int,
     ) -> list[dict]:
         """
-        Sample video frames and detect face positions.
-
-        Args:
-            video_path: Path to the source video.
-            video_width: Native video width in pixels.
-            video_height: Native video height in pixels.
-
-        Returns:
-            List of {"time": float, "center_x": int, "confidence": float} dicts.
-            center_x is in pixels from left edge.
+        Sample video frames and detect face positions across the entire video.
         """
         if not self.available:
             return self._center_fallback(video_width)
