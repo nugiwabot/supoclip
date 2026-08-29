@@ -10,6 +10,8 @@ import random
 from pathlib import Path
 from typing import Any, Optional
 
+logger = logging.getLogger(__name__)
+
 ASSETS_MUSIC_DIR = Path("/workspace/assets/music") if Path("/workspace/assets/music").exists() else (Path(__file__).parent.parent / "assets" / "music")
 ASSETS_SFX_DIR = Path("/workspace/assets/sfx") if Path("/workspace/assets/sfx").exists() else (Path(__file__).parent.parent / "assets" / "sfx")
 
