@@ -650,13 +650,18 @@ def render_sidebar():
                 try:
                     rp = RunPodClient(runpod_key, runpod_endpoint)
                     health = rp.check_health()
-                    workers_ready = health.get("workers", {}).get("ready", "?")
-                    workers_running = health.get("workers", {}).get("running", "?")
-                    st.success(f"✅ Online | Ready: {workers_ready} | Running: {workers_running}")
+                    if "error" in health:
+                        st.error(f"❌ Connection failed: {health['error']}")
+                    else:
+                        workers = health.get("workers", {})
+                        idle = workers.get("idle", 0)
+                        running = workers.get("running", 0)
+                        in_queue = health.get("jobs", {}).get("inQueue", 0)
+                        st.success(f"✅ Terhubung ke RunPod! | Status: Siap (Standby Auto-Scale 0/2 GPU) | Jobs: {in_queue}")
                 except Exception as e:
                     st.error(f"❌ {e}")
             else:
-                st.warning("Enter RunPod credentials first")
+                st.warning("Masukkan RunPod API Key & Endpoint ID terlebih dahulu")
 
         return load_config()
 
