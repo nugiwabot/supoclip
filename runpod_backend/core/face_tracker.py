@@ -28,7 +28,8 @@ class FaceTracker:
     def __init__(self):
         try:
             import mediapipe as mp
-            self.mp_face_detection = mp.solutions.face_detection
+            import mediapipe.solutions.face_detection as mp_face_detection
+            self.mp_face_detection = mp_face_detection
             self.detector = self.mp_face_detection.FaceDetection(
                 model_selection=1,          # 1 = full-range model (better for video)
                 min_detection_confidence=0.5,
