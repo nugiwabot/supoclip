@@ -45,7 +45,7 @@ streamlit run app.py
 
 - **GitHub Repo:** [https://github.com/nugiwabot/supoclip](https://github.com/nugiwabot/supoclip)
 - **Container Image:** `ghcr.io/nugiwabot/supoclip-backend:latest`
-- **RunPod Endpoint ID:** `zdxos18f8mlof6`
+- **RunPod Endpoint ID:** `uezkj05mqodm8f`
 - **GPU Pools:** `AMPERE_24`, `ADA_24` (RTX 3090, RTX 4090, A5000)
 - **Scaling:** Auto-scale 0 to 2 workers (Zero idle cost)
 
