@@ -1,7 +1,7 @@
 # SupoClip v2.0 — RunPod Backend Container
-# Base: RunPod PyTorch 2.1.0 + Python 3.11 + CUDA 12.1
+# Base: RunPod PyTorch 2.2.1 + Python 3.10 + CUDA 12.1
 
-FROM runpod/pytorch:2.1.0-py3.11-cuda12.1.0-devel-ubuntu22.04
+FROM runpod/pytorch:2.2.1-py3.10-cuda12.1.1-devel-ubuntu22.04
 
 # ── System dependencies ──────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
