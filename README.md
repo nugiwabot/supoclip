@@ -41,19 +41,13 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-### 2. Backend (RunPod Serverless)
+### 2. Backend (RunPod Serverless) -- LIVE & CONFIGURED ✅
 
-```bash
-# Build Docker image
-cd runpod_backend
-docker build -t your-dockerhub/supoclip:latest .
-docker push your-dockerhub/supoclip:latest
-```
-
-Then in RunPod dashboard:
-1. Create a **Serverless Endpoint**
-2. Use your Docker image
-3. Copy the **Endpoint ID** to the Streamlit sidebar (No S3 env variables required! Zero-Registration storage works out of the box).
+- **GitHub Repo:** [https://github.com/nugiwabot/supoclip](https://github.com/nugiwabot/supoclip)
+- **Container Image:** `ghcr.io/nugiwabot/supoclip-backend:latest`
+- **RunPod Endpoint ID:** `zdxos18f8mlof6`
+- **GPU Pools:** `AMPERE_24`, `ADA_24` (RTX 3090, RTX 4090, A5000)
+- **Scaling:** Auto-scale 0 to 2 workers (Zero idle cost)
 
 ### 3. Optional S3 Environment Variables (Only if you want custom S3/R2)
 
