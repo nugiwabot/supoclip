@@ -25,25 +25,15 @@ from pathlib import Path
 import requests
 import runpod
 
-# Ensure /app/core is on the path
-sys.path.insert(0, str(Path(__file__).parent))
-
-from core.transcriber import Transcriber
-from core.face_tracker import FaceTracker
-from core.video_editor import VideoEditor
-from core.audio_mixer import AudioMixer
-from core.caption_renderer import CaptionRenderer
-from core.downloader import download_video, get_video_metadata, get_platform_name
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+# Logging setup immediately
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
 )
 logger = logging.getLogger("supoclip.handler")
+logger.info("Initializing SupoClip RunPod Serverless Handler...")
+
 
 # ---------------------------------------------------------------------------
 # Storage helper (Supports Zero-Registration uploaders + Optional S3)
@@ -151,21 +141,8 @@ def _upload_file(local_path: Path, remote_key: str = None, presigned_ttl: int = 
 # Action: Transcribe
 # ---------------------------------------------------------------------------
 def action_transcribe(job_input: dict) -> dict:
-    """
-    Download video, run Whisper transcription, return transcript + duration.
+    from core.transcriber import Transcriber
 
-    Input:
-        video_url: str
-        task_id: str
-        whisper_model: str (optional, default "small")
-
-    Output:
-        transcript: str (full text)
-        timestamped_transcript: str (with timestamps per line)
-        words: list of {"word", "start", "end"} dicts
-        duration: float
-        language: str
-    """
     video_url = job_input["video_url"]
     task_id = job_input.get("task_id", "unknown")
     whisper_model = job_input.get("whisper_model", "small")
@@ -194,23 +171,9 @@ def action_transcribe(job_input: dict) -> dict:
 # Action: Transcribe from URL (YouTube / TikTok / IG)
 # ---------------------------------------------------------------------------
 def action_transcribe_from_url(job_input: dict) -> dict:
-    """
-    Download video from YouTube/TikTok/IG using yt-dlp, then transcribe.
-    The downloaded video is uploaded to storage so the render step can reuse it.
+    from core.transcriber import Transcriber
+    from core.downloader import download_video
 
-    Input:
-        source_url:      str  - Video URL (YouTube, TikTok, IG, etc.)
-        task_id:         str
-        cookies_content: str  - Optional Netscape cookies.txt content
-        whisper_model:   str  - Default "small"
-
-    Output:
-        transcript: str
-        words: list
-        duration: float
-        language: str
-        source_storage_url: str  - URL to the downloaded video (for render step)
-    """
     source_url = job_input["source_url"]
     task_id = job_input.get("task_id", "unknown")
     cookies_content = job_input.get("cookies_content", "")
@@ -254,21 +217,12 @@ def action_transcribe_from_url(job_input: dict) -> dict:
 # Action: Render
 # ---------------------------------------------------------------------------
 def action_render(job_input: dict) -> dict:
-    """
-    Full pipeline: download → reframe → audio mix → captions → upload.
+    from core.transcriber import Transcriber
+    from core.face_tracker import FaceTracker
+    from core.video_editor import VideoEditor
+    from core.audio_mixer import AudioMixer
+    from core.caption_renderer import CaptionRenderer
 
-    Input:
-        video_url: str
-        clips_json: list[dict]  (from AI Brain)
-        task_id: str
-        output_resolution: str  (default "1080x1920")
-        whisper_model: str      (default "small")
-        enable_face_tracking: bool (default True)
-
-    Output:
-        output_urls: list[str]  (presigned URLs for each rendered clip)
-        clip_count: int
-    """
     video_url = job_input["video_url"]
     clips_json = job_input["clips_json"]
     task_id = job_input.get("task_id", "unknown")
@@ -282,7 +236,7 @@ def action_render(job_input: dict) -> dict:
     except Exception:
         out_w, out_h = 1080, 1920
 
-    # Parse clips JSON (may come as string or list)
+    # Parse clips JSON
     if isinstance(clips_json, str):
         clips_json = json.loads(clips_json)
 
@@ -292,17 +246,17 @@ def action_render(job_input: dict) -> dict:
         tmpdir = Path(tmpdir)
         video_path = tmpdir / f"{task_id}_source.mp4"
 
-        # ── Download source video ───────────────────────────────────────
+        # Download source video
         _download_video(video_url, video_path)
 
-        # ── Transcription (for captions) ────────────────────────────────
+        # Transcription (for captions)
         logger.info("Running transcription for caption sync...")
         transcriber = Transcriber(model_size=whisper_model)
         transcription = transcriber.transcribe(video_path)
         word_timestamps = transcription["words"]
         logger.info(f"Got {len(word_timestamps)} word timestamps")
 
-        # ── Initialize modules ──────────────────────────────────────────
+        # Initialize modules
         face_tracker = FaceTracker() if enable_face_tracking else None
         video_editor = VideoEditor(
             source_path=video_path,
@@ -312,26 +266,21 @@ def action_render(job_input: dict) -> dict:
         audio_mixer = AudioMixer()
         caption_renderer = CaptionRenderer()
 
-        # ── Process each clip ───────────────────────────────────────────
         for i, clip_info in enumerate(clips_json):
             clip_id = clip_info.get("clip_id", i + 1)
             high_impact_words = clip_info.get("high_impact_words", [])
             sfx_type = clip_info.get("sfx_type", "sub_bass")
             sfx_timestamp_abs = float(clip_info.get("sfx_timestamp", clip_info["start_time"]))
             clip_start = float(clip_info["start_time"])
-
-            # SFX offset relative to clip start
             sfx_offset_rel = max(0.0, sfx_timestamp_abs - clip_start)
 
             try:
                 logger.info(f"Processing clip {clip_id}/{len(clips_json)}: "
-                           f"{clip_info['start_time']}s → {clip_info['end_time']}s")
+                           f"{clip_info['start_time']}s -> {clip_info['end_time']}s")
 
-                # Step 1: Extract + reframe
                 raw_clip_path = tmpdir / f"clip_{clip_id}_raw.mp4"
                 video_editor.extract_and_reframe_clip(clip_info, raw_clip_path)
 
-                # Step 2: Audio mix + ducking + SFX
                 mixed_clip_path = tmpdir / f"clip_{clip_id}_mixed.mp4"
                 audio_mixer.process_clip(
                     raw_clip_path,
@@ -340,7 +289,6 @@ def action_render(job_input: dict) -> dict:
                     sfx_offset_sec=sfx_offset_rel,
                 )
 
-                # Step 3: Burn captions
                 final_clip_path = tmpdir / f"clip_{clip_id}_final.mp4"
                 caption_renderer.add_captions(
                     mixed_clip_path,
@@ -351,7 +299,6 @@ def action_render(job_input: dict) -> dict:
                     impact_color_idx=i,
                 )
 
-                # Step 4: Upload to S3
                 remote_key = f"outputs/{task_id}/clip_{clip_id:02d}.mp4"
                 presigned_url = _upload_file(final_clip_path, remote_key)
                 output_urls.append({
@@ -360,17 +307,12 @@ def action_render(job_input: dict) -> dict:
                     "viral_score": clip_info.get("viral_score", 0),
                     "hook_title": clip_info.get("hook_title", ""),
                 })
-                logger.info(f"Clip {clip_id} complete ✅")
+                logger.info(f"Clip {clip_id} complete")
 
             except Exception as e:
                 logger.error(f"Clip {clip_id} FAILED: {e}\n{traceback.format_exc()}")
-                output_urls.append({
-                    "clip_id": clip_id,
-                    "url": None,
-                    "error": str(e),
-                })
+                output_urls.append({"clip_id": clip_id, "url": None, "error": str(e)})
 
-        # Cleanup
         video_editor.close()
         if face_tracker:
             face_tracker.close()
@@ -380,28 +322,20 @@ def action_render(job_input: dict) -> dict:
         "clip_count": len(clips_json),
         "successful": sum(1 for c in output_urls if c.get("url")),
     }
+
+
+
 # ---------------------------------------------------------------------------
 # Action: Download & Process (YouTube / TikTok / IG / etc.)
 # ---------------------------------------------------------------------------
 def action_download_and_process(job_input: dict) -> dict:
-    """
-    Full pipeline starting from a public URL (YouTube, TikTok, IG, etc.).
-    Uses yt-dlp to download, then runs transcription + AI analysis is done
-    in the frontend. This action handles: download -> transcribe -> render.
+    from core.transcriber import Transcriber
+    from core.face_tracker import FaceTracker
+    from core.video_editor import VideoEditor
+    from core.audio_mixer import AudioMixer
+    from core.caption_renderer import CaptionRenderer
+    from core.downloader import download_video, get_platform_name
 
-    Input:
-        source_url:         str  - Video URL (YouTube, TikTok, IG Reels, etc.)
-        task_id:            str
-        clips_json:         list - AI clips data (from frontend AI Brain analysis)
-        cookies_content:    str  - Optional Netscape cookies.txt content for auth
-        output_resolution:  str  - Default "1080x1920"
-        whisper_model:      str  - Default "small"
-        enable_face_tracking: bool
-
-    Output:
-        Same as action_render output_urls, clip_count, successful
-        Plus: source_title, source_platform, source_duration
-    """
     source_url = job_input["source_url"]
     task_id = job_input.get("task_id", "unknown")
     clips_json = job_input["clips_json"]
@@ -409,6 +343,7 @@ def action_download_and_process(job_input: dict) -> dict:
     output_res_str = job_input.get("output_resolution", "1080x1920")
     whisper_model = job_input.get("whisper_model", "small")
     enable_face_tracking = job_input.get("enable_face_tracking", True)
+
 
     # Parse resolution
     try:
