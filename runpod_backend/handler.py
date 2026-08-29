@@ -190,14 +190,19 @@ def action_transcribe_from_url(job_input: dict) -> dict:
             cookies_content=cookies_content,
             task_id=task_id,
         )
+        size_mb = video_path.stat().st_size / 1_048_576
+        logger.info(f"[{task_id}] Downloaded: {video_path.name} ({size_mb:.1f} MB)")
 
-        # Upload source so the render step can re-download it
-        remote_key         = f"inputs/{task_id}_source.mp4"
-        source_storage_url = _upload_file(video_path, remote_key)
-        logger.info(f"[{task_id}] Source stored: {source_storage_url[:80]}")
+        # NOTE: We do NOT upload the source video here.
+        # The render step uses action=download_and_process which re-downloads
+        # the video directly from the original URL (YouTube/TikTok/etc.).
+        # Litterbox & Uguu block datacenter IPs so uploading would fail anyway.
+        # We pass the original source_url back as source_storage_url so the
+        # frontend can pass it to the render job.
 
         transcriber = Transcriber(model_size=whisper_model)
         result      = transcriber.transcribe(video_path)
+        logger.info(f"[{task_id}] Transcription done: {len(result.get('words', []))} words, {result.get('duration', 0):.1f}s")
 
     return {
         "transcript":             result["text"],
@@ -205,8 +210,9 @@ def action_transcribe_from_url(job_input: dict) -> dict:
         "words":                  result["words"],
         "duration":               result["duration"],
         "language":               result["language"],
-        "source_storage_url":     source_storage_url,
+        "source_storage_url":     source_url,  # pass original URL back for render step
     }
+
 
 
 # ---------------------------------------------------------------------------
