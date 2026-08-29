@@ -11,7 +11,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-RUNPOD_BASE_URL = "https://api.runpod.io/v2"
+RUNPOD_BASE_URL = "https://api.runpod.ai/v2"
 
 # Job terminal states
 TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"}
@@ -26,14 +26,14 @@ class RunPodClient:
     """
 
     def __init__(self, api_key: str, endpoint_id: str):
-        self.api_key = api_key
-        self.endpoint_id = endpoint_id
+        self.api_key = (api_key or "").strip()
+        self.endpoint_id = (endpoint_id or "").strip()
         self.headers = {
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        self.base = f"{RUNPOD_BASE_URL}/{endpoint_id}"
-        logger.info(f"RunPodClient initialized | endpoint={endpoint_id}")
+        self.base = f"{RUNPOD_BASE_URL}/{self.endpoint_id}"
+        logger.info(f"RunPodClient initialized | endpoint={self.endpoint_id}")
 
     def submit_job(self, payload: dict[str, Any]) -> str:
         """

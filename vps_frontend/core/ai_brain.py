@@ -106,13 +106,15 @@ class AIBrain:
         api_key: str,
         model: str,
     ):
-        self.model = model
+        self.model = (model or "gpt-4o").strip()
+        self.base_url = (base_url or "https://api.openai.com/v1").strip()
+        self.api_key = (api_key or "").strip()
         self.client = OpenAI(
-            base_url=base_url.rstrip("/"),
-            api_key=api_key,
+            base_url=self.base_url,
+            api_key=self.api_key,
             timeout=120.0,
         )
-        logger.info(f"AIBrain initialized | model={model} | base_url={base_url}")
+        logger.info(f"AIBrain initialized | model={self.model} | base_url={self.base_url}")
 
     def analyze_transcript(
         self,
