@@ -1,0 +1,1 @@
+# SupoClip Frontend Core Package

@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.pyc
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+supoclip_tasks.db
+temp_uploads/
+
+# Config (contains API keys — never commit)
+vps_frontend/.supoclip_config.json
+
+# Docker
+runpod_backend/.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp/Output files
+*.tmp
+temp/
+output/
+/workspace/
+
+# Config (contains API keys — never commit)
+vps_frontend/.supoclip_config.json
+.supoclip_config.json
+*.db
+
+# Logs
+*.log
+logs/

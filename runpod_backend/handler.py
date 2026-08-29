@@ -1,0 +1,578 @@
+"""
+SupoClip -- RunPod Serverless Worker Handler
+Entry point for the RunPod serverless container.
+
+Handles three actions:
+  1. "transcribe"           -- Transcribe video and return word-level timestamps
+  2. "render"               -- Full pipeline: reframe + audio mix + captions
+  3. "download_and_process" -- Download YouTube/TikTok/IG URL via yt-dlp + full pipeline
+
+Environment Variables (ALL OPTIONAL):
+  SUPOCLIP_S3_ENDPOINT     -- S3 endpoint URL (optional, uses zero-registration fallback)
+  SUPOCLIP_S3_ACCESS_KEY   -- S3 access key
+  SUPOCLIP_S3_SECRET_KEY   -- S3 secret key
+  SUPOCLIP_S3_BUCKET       -- S3 bucket name
+"""
+
+import json
+import logging
+import os
+import sys
+import tempfile
+import traceback
+from pathlib import Path
+
+import requests
+import runpod
+
+# Ensure /app/core is on the path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from core.transcriber import Transcriber
+from core.face_tracker import FaceTracker
+from core.video_editor import VideoEditor
+from core.audio_mixer import AudioMixer
+from core.caption_renderer import CaptionRenderer
+from core.downloader import download_video, get_video_metadata, get_platform_name
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("supoclip.handler")
+
+# ---------------------------------------------------------------------------
+# Storage helper (Supports Zero-Registration uploaders + Optional S3)
+# ---------------------------------------------------------------------------
+def _download_video(url: str, dest: Path) -> Path:
+    """Download a video from a URL (direct or presigned) to local path."""
+    logger.info(f"Downloading video: {url[:80]}...")
+    resp = requests.get(url, stream=True, timeout=300)
+    resp.raise_for_status()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=65536):
+            f.write(chunk)
+    size_mb = dest.stat().st_size / 1_048_576
+    logger.info(f"Downloaded: {dest.name} ({size_mb:.1f} MB)")
+    return dest
+
+
+def _upload_file(local_path: Path, remote_key: str = None, presigned_ttl: int = 86400) -> str:
+    """
+    Upload rendered video clip.
+    Tries S3 first if configured in env vars, otherwise uses Zero-Registration
+    providers (Litterbox / Uguu) with automatic fallback.
+    """
+    local_path = Path(local_path)
+    s3_endpoint = os.environ.get("SUPOCLIP_S3_ENDPOINT", "").strip()
+    s3_key = os.environ.get("SUPOCLIP_S3_ACCESS_KEY", "").strip()
+    s3_secret = os.environ.get("SUPOCLIP_S3_SECRET_KEY", "").strip()
+    s3_bucket = os.environ.get("SUPOCLIP_S3_BUCKET", "").strip()
+
+    if s3_key and s3_secret and s3_bucket:
+        try:
+            import boto3
+            from botocore.client import Config
+
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=s3_endpoint or None,
+                aws_access_key_id=s3_key,
+                aws_secret_access_key=s3_secret,
+                region_name="auto",
+                config=Config(signature_version="s3v4"),
+            )
+            key = remote_key or f"outputs/{local_path.name}"
+            s3.upload_file(
+                str(local_path),
+                s3_bucket,
+                key,
+                ExtraArgs={"ContentType": "video/mp4"},
+            )
+            url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": s3_bucket, "Key": key},
+                ExpiresIn=presigned_ttl,
+            )
+            logger.info(f"Uploaded to S3: s3://{s3_bucket}/{key}")
+            return url
+        except Exception as e:
+            logger.warning(f"S3 upload failed ({e}), falling back to Zero-Registration storage...")
+
+    # Zero-Registration Storage (No signup / No credentials required)
+    # Provider 1: Litterbox (Catbox) - 72h retention, up to 1GB
+    for attempt in range(1, 4):
+        try:
+            logger.info(f"Uploading {local_path.name} to Litterbox (attempt {attempt})...")
+            with open(local_path, "rb") as f:
+                files = {"fileToUpload": (local_path.name, f, "video/mp4")}
+                data = {"reqtype": "fileupload", "time": "72h"}
+                resp = requests.post(
+                    "https://litterbox.catbox.moe/resources/internals/api.php",
+                    data=data,
+                    files=files,
+                    timeout=180,
+                )
+            if resp.status_code == 200 and resp.text.startswith("http"):
+                url = resp.text.strip()
+                logger.info(f"Litterbox upload complete: {url}")
+                return url
+        except Exception as e:
+            logger.warning(f"Litterbox error on attempt {attempt}: {e}")
+
+    # Provider 2: Uguu.se - 48h retention
+    try:
+        logger.info(f"Uploading {local_path.name} to Uguu.se...")
+        with open(local_path, "rb") as f:
+            files = {"files[]": (local_path.name, f, "video/mp4")}
+            resp = requests.post(
+                "https://uguu.se/upload",
+                files=files,
+                timeout=180,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("success") and data.get("files"):
+                url = data["files"][0]["url"]
+                logger.info(f"Uguu upload complete: {url}")
+                return url
+    except Exception as e:
+        logger.error(f"Uguu error: {e}")
+
+    raise RuntimeError(f"Failed to upload {local_path.name} to storage")
+
+
+# ---------------------------------------------------------------------------
+# Action: Transcribe
+# ---------------------------------------------------------------------------
+def action_transcribe(job_input: dict) -> dict:
+    """
+    Download video, run Whisper transcription, return transcript + duration.
+
+    Input:
+        video_url: str
+        task_id: str
+        whisper_model: str (optional, default "small")
+
+    Output:
+        transcript: str (full text)
+        timestamped_transcript: str (with timestamps per line)
+        words: list of {"word", "start", "end"} dicts
+        duration: float
+        language: str
+    """
+    video_url = job_input["video_url"]
+    task_id = job_input.get("task_id", "unknown")
+    whisper_model = job_input.get("whisper_model", "small")
+
+    with tempfile.TemporaryDirectory(prefix="supoclip_transcribe_") as tmpdir:
+        tmpdir = Path(tmpdir)
+        video_path = tmpdir / f"{task_id}_source.mp4"
+
+        # Download
+        _download_video(video_url, video_path)
+
+        # Transcribe
+        transcriber = Transcriber(model_size=whisper_model)
+        result = transcriber.transcribe(video_path)
+
+        return {
+            "transcript": result["text"],
+            "timestamped_transcript": result["timestamped_transcript"],
+            "words": result["words"],
+            "duration": result["duration"],
+            "language": result["language"],
+        }
+
+
+# ---------------------------------------------------------------------------
+# Action: Transcribe from URL (YouTube / TikTok / IG)
+# ---------------------------------------------------------------------------
+def action_transcribe_from_url(job_input: dict) -> dict:
+    """
+    Download video from YouTube/TikTok/IG using yt-dlp, then transcribe.
+    The downloaded video is uploaded to storage so the render step can reuse it.
+
+    Input:
+        source_url:      str  - Video URL (YouTube, TikTok, IG, etc.)
+        task_id:         str
+        cookies_content: str  - Optional Netscape cookies.txt content
+        whisper_model:   str  - Default "small"
+
+    Output:
+        transcript: str
+        words: list
+        duration: float
+        language: str
+        source_storage_url: str  - URL to the downloaded video (for render step)
+    """
+    source_url = job_input["source_url"]
+    task_id = job_input.get("task_id", "unknown")
+    cookies_content = job_input.get("cookies_content", "")
+    whisper_model = job_input.get("whisper_model", "small")
+
+    logger.info(f"[{task_id}] transcribe_from_url: {source_url[:80]}")
+
+    with tempfile.TemporaryDirectory(prefix="supoclip_url_transcribe_") as tmpdir:
+        tmpdir = Path(tmpdir)
+
+        # Download via yt-dlp
+        video_path = download_video(
+            url=source_url,
+            output_dir=tmpdir,
+            cookies_content=cookies_content,
+            task_id=task_id,
+        )
+
+        # Upload the source video so render step can access it
+        remote_key = f"inputs/{task_id}_source.mp4"
+        source_storage_url = _upload_file(video_path, remote_key)
+        logger.info(f"[{task_id}] Source video stored: {source_storage_url[:60]}")
+
+        # Transcribe
+        transcriber = Transcriber(model_size=whisper_model)
+        result = transcriber.transcribe(video_path)
+
+        return {
+            "transcript": result["text"],
+            "timestamped_transcript": result["timestamped_transcript"],
+            "words": result["words"],
+            "duration": result["duration"],
+            "language": result["language"],
+            "source_storage_url": source_storage_url,
+        }
+
+
+
+
+# ---------------------------------------------------------------------------
+# Action: Render
+# ---------------------------------------------------------------------------
+def action_render(job_input: dict) -> dict:
+    """
+    Full pipeline: download → reframe → audio mix → captions → upload.
+
+    Input:
+        video_url: str
+        clips_json: list[dict]  (from AI Brain)
+        task_id: str
+        output_resolution: str  (default "1080x1920")
+        whisper_model: str      (default "small")
+        enable_face_tracking: bool (default True)
+
+    Output:
+        output_urls: list[str]  (presigned URLs for each rendered clip)
+        clip_count: int
+    """
+    video_url = job_input["video_url"]
+    clips_json = job_input["clips_json"]
+    task_id = job_input.get("task_id", "unknown")
+    output_res_str = job_input.get("output_resolution", "1080x1920")
+    whisper_model = job_input.get("whisper_model", "small")
+    enable_face_tracking = job_input.get("enable_face_tracking", True)
+
+    # Parse resolution
+    try:
+        out_w, out_h = [int(x) for x in output_res_str.lower().split("x")]
+    except Exception:
+        out_w, out_h = 1080, 1920
+
+    # Parse clips JSON (may come as string or list)
+    if isinstance(clips_json, str):
+        clips_json = json.loads(clips_json)
+
+    output_urls = []
+
+    with tempfile.TemporaryDirectory(prefix="supoclip_render_") as tmpdir:
+        tmpdir = Path(tmpdir)
+        video_path = tmpdir / f"{task_id}_source.mp4"
+
+        # ── Download source video ───────────────────────────────────────
+        _download_video(video_url, video_path)
+
+        # ── Transcription (for captions) ────────────────────────────────
+        logger.info("Running transcription for caption sync...")
+        transcriber = Transcriber(model_size=whisper_model)
+        transcription = transcriber.transcribe(video_path)
+        word_timestamps = transcription["words"]
+        logger.info(f"Got {len(word_timestamps)} word timestamps")
+
+        # ── Initialize modules ──────────────────────────────────────────
+        face_tracker = FaceTracker() if enable_face_tracking else None
+        video_editor = VideoEditor(
+            source_path=video_path,
+            face_tracker=face_tracker,
+            output_resolution=(out_w, out_h),
+        )
+        audio_mixer = AudioMixer()
+        caption_renderer = CaptionRenderer()
+
+        # ── Process each clip ───────────────────────────────────────────
+        for i, clip_info in enumerate(clips_json):
+            clip_id = clip_info.get("clip_id", i + 1)
+            high_impact_words = clip_info.get("high_impact_words", [])
+            sfx_type = clip_info.get("sfx_type", "sub_bass")
+            sfx_timestamp_abs = float(clip_info.get("sfx_timestamp", clip_info["start_time"]))
+            clip_start = float(clip_info["start_time"])
+
+            # SFX offset relative to clip start
+            sfx_offset_rel = max(0.0, sfx_timestamp_abs - clip_start)
+
+            try:
+                logger.info(f"Processing clip {clip_id}/{len(clips_json)}: "
+                           f"{clip_info['start_time']}s → {clip_info['end_time']}s")
+
+                # Step 1: Extract + reframe
+                raw_clip_path = tmpdir / f"clip_{clip_id}_raw.mp4"
+                video_editor.extract_and_reframe_clip(clip_info, raw_clip_path)
+
+                # Step 2: Audio mix + ducking + SFX
+                mixed_clip_path = tmpdir / f"clip_{clip_id}_mixed.mp4"
+                audio_mixer.process_clip(
+                    raw_clip_path,
+                    mixed_clip_path,
+                    sfx_type=sfx_type,
+                    sfx_offset_sec=sfx_offset_rel,
+                )
+
+                # Step 3: Burn captions
+                final_clip_path = tmpdir / f"clip_{clip_id}_final.mp4"
+                caption_renderer.add_captions(
+                    mixed_clip_path,
+                    final_clip_path,
+                    word_timestamps=word_timestamps,
+                    high_impact_words=high_impact_words,
+                    clip_start_time=clip_start,
+                    impact_color_idx=i,
+                )
+
+                # Step 4: Upload to S3
+                remote_key = f"outputs/{task_id}/clip_{clip_id:02d}.mp4"
+                presigned_url = _upload_file(final_clip_path, remote_key)
+                output_urls.append({
+                    "clip_id": clip_id,
+                    "url": presigned_url,
+                    "viral_score": clip_info.get("viral_score", 0),
+                    "hook_title": clip_info.get("hook_title", ""),
+                })
+                logger.info(f"Clip {clip_id} complete ✅")
+
+            except Exception as e:
+                logger.error(f"Clip {clip_id} FAILED: {e}\n{traceback.format_exc()}")
+                output_urls.append({
+                    "clip_id": clip_id,
+                    "url": None,
+                    "error": str(e),
+                })
+
+        # Cleanup
+        video_editor.close()
+        if face_tracker:
+            face_tracker.close()
+
+    return {
+        "output_urls": output_urls,
+        "clip_count": len(clips_json),
+        "successful": sum(1 for c in output_urls if c.get("url")),
+    }
+# ---------------------------------------------------------------------------
+# Action: Download & Process (YouTube / TikTok / IG / etc.)
+# ---------------------------------------------------------------------------
+def action_download_and_process(job_input: dict) -> dict:
+    """
+    Full pipeline starting from a public URL (YouTube, TikTok, IG, etc.).
+    Uses yt-dlp to download, then runs transcription + AI analysis is done
+    in the frontend. This action handles: download -> transcribe -> render.
+
+    Input:
+        source_url:         str  - Video URL (YouTube, TikTok, IG Reels, etc.)
+        task_id:            str
+        clips_json:         list - AI clips data (from frontend AI Brain analysis)
+        cookies_content:    str  - Optional Netscape cookies.txt content for auth
+        output_resolution:  str  - Default "1080x1920"
+        whisper_model:      str  - Default "small"
+        enable_face_tracking: bool
+
+    Output:
+        Same as action_render output_urls, clip_count, successful
+        Plus: source_title, source_platform, source_duration
+    """
+    source_url = job_input["source_url"]
+    task_id = job_input.get("task_id", "unknown")
+    clips_json = job_input["clips_json"]
+    cookies_content = job_input.get("cookies_content", "")
+    output_res_str = job_input.get("output_resolution", "1080x1920")
+    whisper_model = job_input.get("whisper_model", "small")
+    enable_face_tracking = job_input.get("enable_face_tracking", True)
+
+    # Parse resolution
+    try:
+        out_w, out_h = [int(x) for x in output_res_str.lower().split("x")]
+    except Exception:
+        out_w, out_h = 1080, 1920
+
+    # Parse clips JSON
+    if isinstance(clips_json, str):
+        clips_json = json.loads(clips_json)
+
+    platform = get_platform_name(source_url)
+    logger.info(f"[{task_id}] Starting download_and_process | platform={platform} | url={source_url[:80]}")
+
+    output_urls = []
+
+    with tempfile.TemporaryDirectory(prefix="supoclip_dlp_") as tmpdir:
+        tmpdir = Path(tmpdir)
+
+        # -- Step 1: Download via yt-dlp ------------------------------------------
+        logger.info(f"[{task_id}] Downloading via yt-dlp...")
+        video_path = download_video(
+            url=source_url,
+            output_dir=tmpdir,
+            cookies_content=cookies_content or "",
+            max_height=out_h,
+            task_id=task_id,
+        )
+        source_size_mb = video_path.stat().st_size / 1_048_576
+        logger.info(f"[{task_id}] Download complete: {video_path.name} ({source_size_mb:.1f} MB)")
+
+        # -- Step 2: Transcribe (for caption sync) ---------------------------------
+        logger.info(f"[{task_id}] Transcribing for caption sync...")
+        transcriber = Transcriber(model_size=whisper_model)
+        transcription = transcriber.transcribe(video_path)
+        word_timestamps = transcription["words"]
+        logger.info(f"[{task_id}] Got {len(word_timestamps)} word timestamps")
+
+        # -- Step 3: Process each clip ---------------------------------------------
+        face_tracker = FaceTracker() if enable_face_tracking else None
+        video_editor = VideoEditor(
+            source_path=video_path,
+            face_tracker=face_tracker,
+            output_resolution=(out_w, out_h),
+        )
+        audio_mixer = AudioMixer()
+        caption_renderer = CaptionRenderer()
+
+        for i, clip_info in enumerate(clips_json):
+            clip_id = clip_info.get("clip_id", i + 1)
+            high_impact_words = clip_info.get("high_impact_words", [])
+            sfx_type = clip_info.get("sfx_type", "sub_bass")
+            sfx_timestamp_abs = float(clip_info.get("sfx_timestamp", clip_info["start_time"]))
+            clip_start = float(clip_info["start_time"])
+            sfx_offset_rel = max(0.0, sfx_timestamp_abs - clip_start)
+
+            try:
+                logger.info(f"[{task_id}] Clip {clip_id}/{len(clips_json)}: "
+                           f"{clip_info['start_time']}s -> {clip_info['end_time']}s")
+
+                raw_clip_path = tmpdir / f"clip_{clip_id}_raw.mp4"
+                video_editor.extract_and_reframe_clip(clip_info, raw_clip_path)
+
+                mixed_clip_path = tmpdir / f"clip_{clip_id}_mixed.mp4"
+                audio_mixer.process_clip(
+                    raw_clip_path,
+                    mixed_clip_path,
+                    sfx_type=sfx_type,
+                    sfx_offset_sec=sfx_offset_rel,
+                )
+
+                final_clip_path = tmpdir / f"clip_{clip_id}_final.mp4"
+                caption_renderer.add_captions(
+                    mixed_clip_path,
+                    final_clip_path,
+                    word_timestamps=word_timestamps,
+                    high_impact_words=high_impact_words,
+                    clip_start_time=clip_start,
+                    impact_color_idx=i,
+                )
+
+                # Upload finished clip
+                remote_key = f"outputs/{task_id}/clip_{clip_id:02d}.mp4"
+                presigned_url = _upload_file(final_clip_path, remote_key)
+                output_urls.append({
+                    "clip_id": clip_id,
+                    "url": presigned_url,
+                    "viral_score": clip_info.get("viral_score", 0),
+                    "hook_title": clip_info.get("hook_title", ""),
+                })
+                logger.info(f"[{task_id}] Clip {clip_id} done")
+
+            except Exception as e:
+                logger.error(f"[{task_id}] Clip {clip_id} FAILED: {e}")
+                output_urls.append({"clip_id": clip_id, "url": None, "error": str(e)})
+
+        video_editor.close()
+        if face_tracker:
+            face_tracker.close()
+
+    return {
+        "output_urls": output_urls,
+        "clip_count": len(clips_json),
+        "successful": sum(1 for c in output_urls if c.get("url")),
+        "source_platform": platform,
+        "source_url": source_url,
+    }
+
+
+# ---------------------------------------------------------------------------
+def handler(job: dict) -> dict:
+    """
+    Main RunPod serverless handler.
+    Routes to action_transcribe or action_render based on job input.
+
+    Zero Crash Policy:
+    - All exceptions are caught and returned as structured error dicts
+    - The worker never panics on bad input
+    """
+    job_id = job.get("id", "unknown")
+    job_input = job.get("input", {})
+    action = job_input.get("action", "render")
+
+    logger.info(f"Job received | id={job_id} | action={action}")
+
+    try:
+        if action == "transcribe":
+            result = action_transcribe(job_input)
+        elif action == "transcribe_from_url":
+            result = action_transcribe_from_url(job_input)
+        elif action == "render":
+            result = action_render(job_input)
+        elif action == "download_and_process":
+            result = action_download_and_process(job_input)
+        else:
+            return {
+                "error": f"Unknown action: '{action}'. Valid: 'transcribe', 'render', 'download_and_process'"
+            }
+
+        logger.info(f"Job {job_id} completed successfully")
+        return result
+
+    except KeyError as e:
+        error_msg = f"Missing required field in job input: {e}"
+        logger.error(f"Job {job_id} — {error_msg}")
+        return {"error": error_msg, "error_type": "KeyError"}
+
+    except Exception as e:
+        error_msg = str(e)
+        tb = traceback.format_exc()
+        logger.error(f"Job {job_id} FAILED:\n{tb}")
+        return {
+            "error": error_msg,
+            "error_type": type(e).__name__,
+            "traceback": tb,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Start serverless worker
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    logger.info("SupoClip RunPod Worker starting...")
+    logger.info(f"Python: {sys.version}")
+    logger.info(f"Working dir: {os.getcwd()}")
+
+    runpod.serverless.start({"handler": handler})
