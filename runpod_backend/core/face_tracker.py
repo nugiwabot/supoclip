@@ -28,7 +28,11 @@ class FaceTracker:
     def __init__(self):
         try:
             import mediapipe as mp
-            import mediapipe.solutions.face_detection as mp_face_detection
+            # Support both mediapipe <0.10 (mp.solutions) and >=0.10 (direct module)
+            if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'face_detection'):
+                mp_face_detection = mp.solutions.face_detection
+            else:
+                import mediapipe.solutions.face_detection as mp_face_detection
             self.mp_face_detection = mp_face_detection
             self.detector = self.mp_face_detection.FaceDetection(
                 model_selection=1,          # 1 = full-range model (better for video)
@@ -36,8 +40,8 @@ class FaceTracker:
             )
             self.available = True
             logger.info("MediaPipe face detector initialized")
-        except ImportError:
-            logger.warning("MediaPipe not available — using center-crop fallback")
+        except (ImportError, AttributeError, Exception) as e:
+            logger.warning(f"MediaPipe not available ({e}) — using center-crop fallback")
             self.available = False
             self.detector = None
 
